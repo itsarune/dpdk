@@ -49,6 +49,7 @@ static int promiscuous_on;
 #define RTE_LOGTYPE_L2FWD RTE_LOGTYPE_USER1
 
 #define MAX_PKT_BURST 32
+//#define MAX_PKT_BURST 512
 #define BURST_TX_DRAIN_US 100 /* TX drain every ~100us */
 #define MEMPOOL_CACHE_SIZE 256
 
@@ -112,6 +113,9 @@ struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 /* A tsc-based timer responsible for triggering statistics printout */
 static uint64_t timer_period = 10; /* default period is 10 seconds */
 
+static uint64_t max_num_burst[RTE_MAX_ETHPORTS];
+static uint64_t max_time_us[RTE_MAX_ETHPORTS];
+
 /* Print out statistics on packets dropped */
 static void
 print_stats(void)
@@ -170,7 +174,11 @@ l2fwd_mac_updating(struct rte_mbuf *m, unsigned dest_portid)
 
 	/* 02:00:00:00:00:xx */
 	tmp = &eth->dst_addr.addr_bytes[0];
-	*((uint64_t *)tmp) = 0x000000000002 + ((uint64_t)dest_portid << 40);
+	//*((uint64_t *)tmp) = 0x000000000002 + ((uint64_t)dest_portid << 40);
+	*((uint64_t *)tmp) = 0x839267d23fb8;
+	if(dest_portid == 0) {
+		*((uint64_t *) tmp) = 0xd42fb9d23fb8;
+	}
 
 	/* src addr */
 	rte_ether_addr_copy(&l2fwd_ports_eth_addr[dest_portid], &eth->src_addr);
@@ -207,9 +215,12 @@ l2fwd_main_loop(void)
 	uint64_t prev_tsc, diff_tsc, cur_tsc, timer_tsc;
 	unsigned i, j, portid, nb_rx;
 	struct lcore_queue_conf *qconf;
+	const uint64_t tsc_hz = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S;
 	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S *
 			BURST_TX_DRAIN_US;
 	struct rte_eth_dev_tx_buffer *buffer;
+	uint64_t benchmark_prev_tsc = 0;
+	uint64_t benchmark_nb_rx = 0;
 
 	prev_tsc = 0;
 	timer_tsc = 0;
@@ -225,7 +236,6 @@ l2fwd_main_loop(void)
 	RTE_LOG(INFO, L2FWD, "entering main loop on lcore %u\n", lcore_id);
 
 	for (i = 0; i < qconf->n_rx_port; i++) {
-
 		portid = qconf->rx_port_list[i];
 		RTE_LOG(INFO, L2FWD, " -- lcoreid=%u portid=%u\n", lcore_id,
 			portid);
@@ -233,7 +243,6 @@ l2fwd_main_loop(void)
 	}
 
 	while (!force_quit) {
-
 		/* Drains TX queue in its main loop. 8< */
 		cur_tsc = rte_rdtsc();
 
@@ -241,6 +250,14 @@ l2fwd_main_loop(void)
 		 * TX burst queue drain
 		 */
 		diff_tsc = cur_tsc - prev_tsc;
+		uint64_t diff_us = (cur_tsc - benchmark_prev_tsc) / tsc_hz;
+		if (benchmark_nb_rx > 0 && diff_us > max_time_us[qconf->rx_port_list[0]]) {
+			max_time_us[qconf->rx_port_list[0]] = diff_us;
+			max_num_burst[qconf->rx_port_list[0]] = benchmark_nb_rx;
+		}
+		benchmark_prev_tsc = cur_tsc;
+		benchmark_nb_rx = 0;
+
 		if (unlikely(diff_tsc > drain_tsc)) {
 
 			for (i = 0; i < qconf->n_rx_port; i++) {
@@ -255,22 +272,22 @@ l2fwd_main_loop(void)
 			}
 
 			/* if timer is enabled */
-			if (timer_period > 0) {
+			//if (timer_period > 0) {
 
-				/* advance the timer */
-				timer_tsc += diff_tsc;
+			//	/* advance the timer */
+			//	timer_tsc += diff_tsc;
 
-				/* if timer has reached its timeout */
-				if (unlikely(timer_tsc >= timer_period)) {
+			//	/* if timer has reached its timeout */
+			//	if (unlikely(timer_tsc >= timer_period)) {
 
-					/* do this only on main core */
-					if (lcore_id == rte_get_main_lcore()) {
-						print_stats();
-						/* reset the timer */
-						timer_tsc = 0;
-					}
-				}
-			}
+			//		/* do this only on main core */
+			//		if (lcore_id == rte_get_main_lcore()) {
+			//			print_stats();
+			//			/* reset the timer */
+			//			timer_tsc = 0;
+			//		}
+			//	}
+			//}
 
 			prev_tsc = cur_tsc;
 		}
@@ -282,6 +299,9 @@ l2fwd_main_loop(void)
 			portid = qconf->rx_port_list[i];
 			nb_rx = rte_eth_rx_burst(portid, 0,
 						 pkts_burst, MAX_PKT_BURST);
+			if (nb_rx > benchmark_nb_rx) {
+				benchmark_nb_rx = nb_rx;
+			}
 
 			if (unlikely(nb_rx == 0))
 				continue;
@@ -294,8 +314,10 @@ l2fwd_main_loop(void)
 				l2fwd_simple_forward(m, portid);
 			}
 		}
-		/* >8 End of read packet from RX queues. */
+		/* >9 End of read packet from RX queues. */
 	}
+
+	RTE_LOG(INFO, L2FWD, "lcore id: %u, Max loop time: %lu, packet burst: %lu\n", lcore_id, max_time_us[qconf->rx_port_list[0]], max_num_burst[qconf->rx_port_list[0]]);
 }
 
 static int
